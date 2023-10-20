@@ -15,7 +15,7 @@ COPY configs.py /app/
 COPY requirements.txt /app/
 
 # Устанавливаем зависимости Python
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install -r requirements.txt
 
 # Запуск вашего бота при старте контейнера
 CMD ["python3", "rrr.py"]
