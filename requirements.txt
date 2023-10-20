@@ -1,3 +1,5 @@
-requests =2.25.1
-python-redmine=2.3.0
-aiogram=2.11.2
+requests 
+python-redmine
+aiogram ==2.11
+aioschedule 
+aiohttp ==3.8.5
