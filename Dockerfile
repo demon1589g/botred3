@@ -13,7 +13,7 @@ WORKDIR /app
 COPY . .
 COPY rrr.py /app/
 COPY configs.py /app/
-COPY requirements.txt /app/
+COPY requirements.txt .
 
 # Устанавливаем зависимости Python
 RUN pip3 install -r requirements.txt
