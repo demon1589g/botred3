@@ -1,0 +1,358 @@
+async def get_users(page=1):
+    logger.info(f"Get users - page: {page}")
+    redmine =await get_redmine(None)
+    cache_key = f"users_{page}"
+
+    async def users_request():
+        return redmine.redmine.user.filter(offset=(page - 1) * PAGE_SIZE, limit=PAGE_SIZE)
+
+    return await cached_request(cache_key, users_request)
+
+
+async def send_comment(issue_id, user_id, comment_text):
+    logger.info(f"Send comment - issue_id: {issue_id}, user_id: {user_id}")
+    redmine =await get_redmine(user_id)
+    try:
+        redmine.redmine.issue.update(issue_id, notes=comment_text)
+        # Удаляем кэш для задачи после отправки комментария
+        cache_key = f"issue_{issue_id}"
+        if cache_key in cache:
+            del cache[cache_key]
+        await bot.send_message(user_id, "Комментарий успешно отправлен.\nДля продолжения работы вызовите меню, расположенное в правом нижнем углу ↘️")
+    except Exception as e:
+        logger.error(f"Error sending comment: {e}")
+        await bot.send_message(user_id, "Ошибка при отправке комментария. Пожалуйста, попробуйте снова.")
+        raise
+
+
+PAGE_SIZE = 10
+
+async def get_projects(user_id):
+    logger.info("Get projects")
+    redmine =await get_redmine(user_id)
+    cache_key = f"projects"
+
+    async def projects_request():
+        all_projects = redmine.redmine.project.all()
+        return all_projects
+
+    return await cached_request(cache_key, projects_request)
+
+
+
+
+
+
+
+# Словарь для кэширования
+cache = {}
+
+# Время жизни кэша (в секундах)
+CACHE_EXPIRY = 0
+
+def update_cache(cache_key, result):
+    cache[cache_key] = (time.time(), result)
+
+
+async def cached_request(cache_key, request_func):
+    if cache_key in cache:
+        timestamp, result = cache[cache_key]
+        if time.time() - timestamp <= CACHE_EXPIRY:
+            return result
+
+    result = await request_func()
+    cache[cache_key] = (time.time(), result)
+    return result
+
+
+async def get_all_issues(user_id, is_assigned=False, is_watching=False, is_assigned_by_me=False):
+    logger.info(f"Get all issues - user_id: {user_id}, is_assigned: {is_assigned}, is_watching: {is_watching}, is_assigned_by_me: {is_assigned_by_me}")
+    redmine =await get_redmine(user_id)
+    user = await get_user(redmine, 'me')
+
+    # We need to differentiate between the user's personal ID and the group IDs
+    personal_id = user.id
+    group_ids = [group.id for group in user.groups]
+
+    issues = []
+
+    if is_assigned:
+        # Add issues assigned to the user or one of their groups
+        issues += list(redmine.redmine.issue.filter(assigned_to_id=personal_id, status_id='*'))
+        for id in group_ids:
+            issues += list(redmine.redmine.issue.filter(assigned_to_id=id, status_id='*'))
+    if is_watching:
+        # Add issues watched by the user or one of their groups
+        issues += list(redmine.redmine.issue.filter(watcher_id=personal_id, status_id='*'))
+        for id in group_ids:
+            issues += list(redmine.redmine.issue.filter(watcher_id=id, status_id='*'))
+    if is_assigned_by_me:
+        # Add issues created by the user
+        issues += list(redmine.redmine.issue.filter(author_id=personal_id, status_id='*'))
+
+    # Filter out issues that are closed
+    issues = [issue for issue in issues if not issue.status.is_closed]
+
+    return issues
+
+
+
+async def get_projects_with_tasks(callback_query: types.CallbackQuery, callback_prefix):
+    user_id = callback_query.from_user.id
+    redmine =await get_redmine(user_id)
+    all_projects = redmine.redmine.project.all()
+
+    cache_key = f"projects_with_tasks_{user_id}_{callback_prefix}"
+
+    async def projects_request():
+        # Create a list to store projects with tasks
+        projects_with_tasks = []
+        issue_counts = {}
+
+        # Get all issues based on filters
+        if callback_prefix == 'assignedtome_':
+            issues = await get_all_issues(user_id, is_assigned=True)
+        elif callback_prefix == 'watching_':
+            issues = await get_all_issues(user_id, is_watching=True)
+        elif callback_prefix == 'assignedbyme_':
+            issues = await get_all_issues(user_id, is_assigned_by_me=True)
+
+        # Group issues by project
+        issues_by_project = {}
+        for issue in issues:
+            if issue.project.id not in issues_by_project:
+                issues_by_project[issue.project.id] = []
+            issues_by_project[issue.project.id].append(issue)
+
+        # Iterate over all projects and add those with tasks to projects_with_tasks
+        for project in all_projects:
+            if project.id in issues_by_project:
+                issue_counts[project.id] = len(issues_by_project[project.id])
+                projects_with_tasks.append(project)
+
+        return projects_with_tasks, len(all_projects), issue_counts
+
+    return await cached_request(cache_key, projects_request)
+
+
+
+
+
+
+async def get_issue(issue_id, user_id):
+    logger.info(f"Get issue - issue_id: {issue_id}, user_id: {user_id}")
+    redmine =await get_redmine(user_id)
+    issue = redmine.redmine.issue.get(issue_id)
+    return issue
+
+def get_from_cache(cache_key):
+    if cache_key in cache:
+        timestamp, result = cache[cache_key]
+        if time.time() - timestamp <= CACHE_EXPIRY:
+            return result
+    return None
+
+async def view_issues(user_id, page=1, is_assigned=False, is_watching=False, is_assigned_by_me=False, project_id=None):
+    logger.info(f"View issues - user_id: {user_id}, page: {page}, is_assigned: {is_assigned}, is_watching: {is_watching}, is_assigned_by_me: {is_assigned_by_me}")
+    redmine = await get_redmine(user_id)
+    if redmine is None:
+        raise ValueError("Redmine instance not found.")
+
+    user = await get_user(redmine, 'me')
+    cache_key = f"view_issues_{user_id}_{page}_{int(is_assigned)}_{int(is_watching)}_{int(is_assigned_by_me)}_{project_id}"
+
+    cached_data = get_from_cache(cache_key)
+    if cached_data is not None:
+        # Если есть закешированные данные, вернуть их без вычисления total_pages
+        return cached_data
+
+    user_id = user.id
+    group_ids = [group.id for group in user.groups]
+
+    issues = []
+    
+    async def issues_request():
+        nonlocal issues
+        if is_assigned_by_me:
+            issues += list(redmine.redmine.issue.filter(project_id=project_id, author_id=user_id, status_id='*'))
+        if is_assigned:
+            issues += list(redmine.redmine.issue.filter(project_id=project_id, assigned_to_id=user_id, status_id='*'))
+            for group_id in group_ids:
+                issues += list(redmine.redmine.issue.filter(project_id=project_id, assigned_to_id=group_id, status_id='*'))
+        if is_watching:
+            issues += list(redmine.redmine.issue.filter(project_id=project_id, watcher_id=user_id, status_id='*'))
+            for group_id in group_ids:
+                issues += list(redmine.redmine.issue.filter(project_id=project_id, watcher_id=group_id, status_id='*'))
+        # if is_assigned_by_me:
+        #     issues += list(redmine.redmine.issue.filter(project_id=project_id, author_id=user_id, status_id='*'))
+
+        # Filter out issues that are closed
+        issues = [issue for issue in issues if not issue.status.is_closed]
+
+        start_index = (page - 1) * ITEMS_PER_PAGE
+        end_index = start_index + ITEMS_PER_PAGE
+        paginated_issues = issues[start_index:end_index]
+
+        # Calculate total_pages based on the paginated issues
+        total_pages = (len(issues) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
+        result = paginated_issues, total_pages
+        return result
+
+    result = await cached_request(cache_key, issues_request)
+
+    return result
+
+
+@dp.message_handler(lambda message: message.text == 'Просмотр задач 👁️')
+async def handle_task_view(message: types.Message):
+    markup = InlineKeyboardMarkup()
+    markup.add(
+         InlineKeyboardButton("Мне поручено", callback_data="assignedtome_selectproject_1"),
+         InlineKeyboardButton("Я наблюдаю", callback_data="watching_selectproject_1"),
+         InlineKeyboardButton("Я поручил", callback_data="assignedbyme_selectproject_1"),
+         InlineKeyboardButton("Поиск задачи 🔎", callback_data="search_")  
+    )
+    await bot.send_message(message.chat.id, "Выберите тип задач:", reply_markup=markup)
+
+
+
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('assignedtome_selectproject_'))
+async def assigned_to_me_select_project_page_callback_handler(query: types.CallbackQuery):
+    await bot.answer_callback_query(query.id)
+    page = int(query.data.split('_')[2])  # номер страницы теперь находится здесь
+    await handle_select_project(query, 'assignedtome_')
+
+@dp.callback_query_handler(lambda c: c.data.startswith('watching_selectproject_'))
+async def watching_select_project_page_callback_handler(query: types.CallbackQuery):
+    await bot.answer_callback_query(query.id)
+    page = int(query.data.split('_')[2])  # номер страницы теперь находится здесь
+    await handle_select_project(query, 'watching_')
+
+@dp.callback_query_handler(lambda c: c.data.startswith('assignedbyme_selectproject_'))
+async def assigned_by_me_select_project_page_callback_handler(query: types.CallbackQuery):
+    await bot.answer_callback_query(query.id)
+    page = int(query.data.split('_')[2])  # номер страницы теперь находится здесь
+    await handle_select_project(query, 'assignedbyme_')
+
+async def handle_select_project(callback_query: types.CallbackQuery, callback_prefix, page=1):
+    user_id = callback_query.from_user.id
+    projects, total_page, issue_counts = await get_projects_with_tasks(callback_query, callback_prefix)
+    
+ 
+    issues = await get_all_issues(user_id, is_assigned=callback_prefix=='assignedtome_', is_watching=callback_prefix=='watching_', is_assigned_by_me=callback_prefix=='assignedbyme_')
+    
+
+    for project in projects:
+        project_issues = [issue for issue in issues if issue.project.id == project.id]
+        issue_counts[project.id] = len(project_issues)
+    
+    if not projects: 
+        await bot.send_message(callback_query.from_user.id, "Проектов не найдено.")
+        return
+
+    kb = InlineKeyboardMarkup()
+    for project in projects:
+
+        kb.add(InlineKeyboardButton(f"{project.name} (задач: {issue_counts[project.id]})", 
+                                    callback_data=f'{callback_prefix}project_{project.id}~{project.name}'))
+        
+
+    
+    chat_id = callback_query.message.chat.id
+    previous_message = get_from_cache(f"{callback_prefix}")
+    
+
+    
+    message = await bot.send_message(chat_id=chat_id, text=f'Выберите проект:', reply_markup=kb)
+    update_cache(f"{callback_prefix}", message.message_id)
+
+
+
+
+
+
+
+
+async def process_callback_project(callback_query: types.CallbackQuery, callback_data_prefix: str, task_desc: str, is_assigned=False, is_watching=False, is_assigned_by_me=False):
+    logger.info("Project selected")
+    await bot.answer_callback_query(callback_query.id)
+    
+    # Используем '~' в качестве разделителя
+    split_data = callback_query.data.split(f'{callback_data_prefix}project_')[1].split("~")
+    project_id = int(split_data[0])
+    project_name = "~".join(split_data[1:])
+    
+    issues, total_issues = await view_issues(callback_query.from_user.id, page=1, is_assigned=is_assigned, is_watching=is_watching, is_assigned_by_me=is_assigned_by_me, project_id=project_id)
+    
+    await bot.edit_message_text(f"Задачи, {task_desc} в проекте {project_name}:",
+                                chat_id=callback_query.from_user.id,
+                                message_id=callback_query.message.message_id,
+                                reply_markup=issues_pagination_keyboard(issues, f'{callback_data_prefix}', 1, total_issues, project_id))
+
+
+
+
+
+# @dp.callback_query_handler(lambda c: c.data.startswith('assignedtome_project_'))
+# async def process_callback_project_assigned(callback_query: types.CallbackQuery):
+#     await process_callback_project(callback_query, 'assignedtome_', "которые вам поручены", is_assigned=True)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('watching_project_'))
+async def process_callback_project_watching(callback_query: types.CallbackQuery):
+    await process_callback_project(callback_query, 'watching_', "которые вы наблюдаете", is_watching=True)
+
+
+# @dp.callback_query_handler(lambda c: c.data.startswith('assignedbyme_project_'))
+# async def process_callback_project_assigned_by_me(callback_query: types.CallbackQuery):
+#     await process_callback_project(callback_query, 'assignedbyme_', "которые вы поручили", is_assigned_by_me=True)
+
+    
+async def common_callback_handler(query, task_desc, is_assigned=False, is_watching=False, is_assigned_by_me=False):
+    await bot.answer_callback_query(query.id)
+    page, project_id = map(int, query.data.split('_')[1:3])
+    issues, total_issues = await view_issues(query.from_user.id, page=page, is_assigned=is_assigned, is_watching=is_watching, is_assigned_by_me=is_assigned_by_me, project_id=project_id)
+    await bot.edit_message_text(f"Задачи, {task_desc}:", chat_id=query.from_user.id,
+                                message_id=query.message.message_id,
+                                reply_markup=issues_pagination_keyboard(issues, 'assignedbyme_', page, total_issues, project_id))
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('assignedtome_') and int(c.data.split('_')[1]) > 0)
+async def assigned_to_me_callback_handler(query: types.CallbackQuery):
+    await common_callback_handler(query, "которые вам поручены", is_assigned=True)  # использование общей функции
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('watching_') and int(c.data.split('_')[1]) > 0)
+async def watching_callback_handler(query: types.CallbackQuery):
+    await common_callback_handler(query, "которые вы наблюдаете", is_watching=True)  # использование общей функции
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('assignedbyme_') and int(c.data.split('_')[1]) > 0)
+async def assigned_by_me_callback_handler(query: types.CallbackQuery):
+    await common_callback_handler(query, "которые вы поручили", is_assigned_by_me=True)  # использование общей функции
+
+    
+def issues_pagination_keyboard(issues, callback_data_prefix, current_page, total_pages, project_id):
+    keyboard = InlineKeyboardMarkup()
+
+    # Убедитесь, что issues не пуст и не содержит None или другие нежелательные значения
+    if issues:
+        for issue in issues:
+            if issue is not None:  # Проверка на None или другие нежелательные значения
+                keyboard.add(InlineKeyboardButton(f"#{issue.id} {issue.subject} - {issue.status.name}", callback_data=f"viewissue_{issue.id}"))
+    else:
+        # Возможно, вы хотите добавить кнопку или сообщение, указывающее, что проблем не найдено
+        keyboard.add(InlineKeyboardButton("No issues found", callback_data="no_issues", disabled=True))
+
+    if total_pages > 1:
+        buttons_row = []
+        if current_page > 1:
+            buttons_row.append(InlineKeyboardButton("◀️Предыдущая страница", callback_data=f"{callback_data_prefix}{current_page - 1}_{project_id}"))
+        buttons_row.append(InlineKeyboardButton(f"Страница {current_page}/{total_pages}", callback_data="dummy_data", disabled=True))
+        if current_page < total_pages:
+            buttons_row.append(InlineKeyboardButton("Следующая страница▶️", callback_data=f"{callback_data_prefix}{current_page + 1}_{project_id}"))
+        keyboard.row(*buttons_row)
+
+    return keyboard
+
+
