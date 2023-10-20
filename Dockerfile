@@ -1,6 +1,6 @@
 # Используем базовый образ Ubuntu
 #FROM python:3.8-slim-buster
-FROM python
+FROM python:3.8-slim-buster
 
 # Устанавливаем необходимые пакеты и Python
 RUN apt-get update && apt-get install -y \
