@@ -22,10 +22,21 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from configs import REST_API_TOKEN, User, TELEGRAM_API_TOKEN, REDMINE_URL, REST_API_URL, ADMIN_TELEGRAM_ID, ALLOWED_TELEGRAM_IDS, REDMINE_API_KEY_admin
 from datetime import datetime, timedelta
 import aioschedule as schedule
-
+import os
 
 ITEMS_PER_PAGE = 8
 PAGE_SIZE = 10
+
+
+REST_API_URL = os.environ["REST_API_URL"]
+REST_API_TOKEN = os.environ["REST_API_TOKEN"]
+TELEGRAM_API_TOKEN = os.environ["TELEGRAM_API_TOKEN"]
+REDMINE_URL = os.environ["REDMINE_URL"]
+REDMINE_API_KEY = os.environ["REDMINE_API_KEY"]
+REDMINE_API_KEY_admin = os.environ["REDMINE_API_KEY_admin"]
+ADMIN_TELEGRAM_ID =  os.environ["ADMIN_TELEGRAM_ID"]
+
+
 
 USER_API = configs.UserAPI(REST_API_TOKEN)
 bot = Bot(token=TELEGRAM_API_TOKEN)
