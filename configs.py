@@ -14,10 +14,10 @@ from logging import Logger, getLogger
 # ADMIN_TELEGRAM_ID =  keys.ADMIN_TELEGRAM_ID
 
 
-REST_API_URL = os.environ["https://physics.itmo.ru/ru/rest/export/json/check-users-roles-email"]
+REST_API_URL = ("https://physics.itmo.ru/ru/rest/export/json/check-users-roles-email")
 REST_API_TOKEN = os.environ["REST_API_TOKEN"]
 TELEGRAM_API_TOKEN = os.environ["TELEGRAM_API_TOKEN"]
-REDMINE_URL = os.environ["https://helpdesk.physics.itmo.ru"]
+REDMINE_URL = ('https://helpdesk.physics.itmo.ru/')
 REDMINE_API_KEY = os.environ["REDMINE_API_KEY"]
 REDMINE_API_KEY_admin = os.environ["REDMINE_API_KEY_admin"]
 ADMIN_TELEGRAM_ID =  os.environ["ADMIN_TELEGRAM_ID"]
