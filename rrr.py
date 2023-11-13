@@ -269,7 +269,6 @@ async def process_callback_projects_done(callback_query: types.CallbackQuery):
 
 # async def check_and_update_issues(user_id, project_ids, inactivity_period_minutes=2):
 async def check_and_update_issues(user_id, project_ids, inactivity_period_days=14):
-
     try:
         logger.info(f"Started check_and_update_issues for user {user_id} with projects {project_ids}")
         redmine = get_redmine_api_admin(ADMIN_TELEGRAM_ID)
@@ -284,13 +283,15 @@ async def check_and_update_issues(user_id, project_ids, inactivity_period_days=1
         }
 
         now = datetime.now()
-        # inactivity_threshold = now - timedelta(minutes=inactivity_period_minutes)
         inactivity_threshold = now - timedelta(days=inactivity_period_days)
 
+        total_issues_checked = 0
+        total_issues_closed = 0
         all_issues = []
 
         for project_id in project_ids:
             issues = redmine.redmine.issue.filter(project_id=project_id, status_id=status_mapping["completed"])
+            total_issues_checked += len(issues)
             logger.debug(f"Found {len(issues)} issues with 'completed' status for project_id {project_id}")
             all_issues.extend(issues)
 
@@ -308,7 +309,6 @@ async def check_and_update_issues(user_id, project_ids, inactivity_period_days=1
 
             logger.debug(f"Comparing issue updated_on: {updated_on} with inactivity_threshold: {inactivity_threshold}")
             
-            
             if issue.status.id == status_mapping["completed"] and updated_on <= inactivity_threshold:
                 logger.debug(f"Trying to update status for issue with id: {issue.id}")
                 
@@ -322,13 +322,19 @@ async def check_and_update_issues(user_id, project_ids, inactivity_period_days=1
                     
                     issue.save()
                     logger.debug(f"Saved changes for issue with id: {issue.id}")
+
+                    total_issues_closed += 1
                 except AttributeError as e:
                     logger.error(f"AttributeError while processing issue with id {issue.id}: {e}")
 
-
-        await bot.send_message(user_id, "Проверка и обновление задач завершены.")
+        await bot.send_message(user_id, f"Проверка и обновление задач завершены. "
+                                        f"Всего проверено задач: {total_issues_checked}. "
+                                        f"Закрыто задач: {total_issues_closed}.")
     except Exception as e:
         logger.error(f"Error in check_and_update_issues: {e}")
+        await bot.send_message(user_id, "Произошла ошибка во время проверки и обновления задач.")
+
+
 
 
 
@@ -1613,18 +1619,26 @@ async def fetch_issues(redmine, personal_id, group_ids, updated_since):
     logging.info(f"Fetching issues for personal_id: {personal_id} and groups: {group_ids} updated since {updated_since}")
     # Fetching issues based on different criteria
     issues_assigned = list(redmine.redmine.issue.filter(status_id='*', updated_on=f">={updated_since}", assigned_to_id=personal_id))
+    
     issues_assigned_to_groups = []
     for group_id in group_ids:
         issues_assigned_to_groups += list(redmine.redmine.issue.filter(status_id='*', updated_on=f">={updated_since}", assigned_to_id=group_id))
 
     issues_authored = list(redmine.redmine.issue.filter(status_id='*', updated_on=f">={updated_since}", author_id=personal_id))
+    
     issues_watched = list(redmine.redmine.issue.filter(status_id='*', updated_on=f">={updated_since}", watcher_id=personal_id))
     
+    # Добавляем задачи, за которыми наблюдают группы пользователя
+    issues_watched_by_groups = []
+    for group_id in group_ids:
+        issues_watched_by_groups += list(redmine.redmine.issue.filter(status_id='*', updated_on=f">={updated_since}", watcher_id=group_id))
+
     # Combine all issues and remove duplicates
-    all_issues = issues_assigned + issues_authored + issues_watched + issues_assigned_to_groups
+    all_issues = issues_assigned + issues_assigned_to_groups + issues_authored + issues_watched + issues_watched_by_groups
     unique_issues = {issue.id: issue for issue in all_issues}
     
     return list(unique_issues.values())
+
 
 
 async def check_updates(user_id):
@@ -1665,7 +1679,8 @@ async def check_updates(user_id):
 
             if issue_id not in last_state[user_id]:
                 logging.info(f"New issue_id: {issue_id} for user_id: {user_id}")
-                message = f"У вас новая задача или обновлена старая!\nЗадача #{issue_id}\nТема: {issue.subject}\nОписание: {issue.description}\n"
+                message = f"У вас новая задача или обновлена старая!\nЗадача #{issue_id}\nСтатус: {issue.status.name}\nТема: {issue.subject}\nОписание: {issue.description}\n"
+
                 new_comment = new_issue.get('last_journal')
                 if new_comment:
                     message += f"Новый комментарий от: {new_comment}\n"
@@ -1689,7 +1704,8 @@ async def check_updates(user_id):
                             else:
                                 differences += f"{key} изменено с '{old_issue.get(key)}' на '{new_issue.get(key)}'\n"
 
-                message = f"Задача #{issue_id}\nТема: {issue.subject} обновлена:\nОписание: {issue.description}\n"
+                message = f"Задача #{issue_id}\nСтатус: {issue.status.name}\nТема: {issue.subject} обновлена:\nОписание: {issue.description}\n"
+
                 if differences:
                     message += differences
                 if new_comment:
