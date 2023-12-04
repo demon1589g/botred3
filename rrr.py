@@ -1541,14 +1541,17 @@ async def view_issue_callback_handler(query: types.CallbackQuery):
     comments = [(entry.user.name, entry.notes) for entry in journal_entries if entry.notes] 
     # Находим имя пользователя и его комментарий
 
+    author_name = issue.author.name if issue.author else "Неизвестный автор"
+
     if comments:
         formatted_comments = '\n\n'.join([f"{name} писал(а):\n{comment}" for name, comment in comments])  
         # Форматируем каждый комментарий с именем пользователя
-        text = f"Задача #{issue.id} - {issue.status.name}\n{issue.subject}\n\nСтатус:\n{issue.status.name}\n\nИсполнитель:\n{issue.assigned_to.name}\n\nОписание:\n{issue.description}\n\nКомментарии:\n{formatted_comments}"
+        text = f"Задача #{issue.id} - {issue.status.name}\n{issue.subject}\n\nАвтор:\n{author_name}\n\nИсполнитель:\n{issue.assigned_to.name}\n\nСтатус:\n{issue.status.name}\n\nОписание:\n{issue.description}\n\nКомментарии:\n{formatted_comments}"
     else:
-        text = f"Задача #{issue.id} - {issue.status.name}\n{issue.subject}\n\nСтатус:\n{issue.status.name}\n\nИсполнитель:\n{issue.assigned_to.name}\nОписание:\n{issue.description}"
+        text = f"Задача #{issue.id} - {issue.status.name}\n{issue.subject}\n\nАвтор:\n{author_name}\n\nИсполнитель:\n{issue.assigned_to.name}\n\nСтатус:\n{issue.status.name}\n\nОписание:\n{issue.description}"
 
     await bot.send_message(query.from_user.id, text, reply_markup=comment_buttons(issue_id))
+
 
 
 def comment_buttons(issue_id):
@@ -1600,16 +1603,28 @@ from datetime import datetime, timedelta
 import traceback
 
 def to_dict(issue):
+    # Извлекаем информацию о последнем комментарии и пользователе, который его оставил
     journals = [(journal.user.name, journal.notes) for journal in issue.journals if journal.notes]
     last_user, last_journal = journals[-1] if journals else (None, None)
     last_journal_with_user = f"{last_user}: {last_journal}" if last_user else last_journal
+
+    # Извлекаем информацию об авторе задачи
+    author_name = issue.author.name if issue.author else "Неизвестный автор"
+
+    # Извлекаем информацию о том, кому задача назначена
+    assigned_to_name = issue.assigned_to.name if issue.assigned_to else "Не назначено"
+
+    # Составляем и возвращаем словарь с данными задачи
     return {
         'id': issue.id,
         'subject': issue.subject,
         'status': issue.status.name,
         'description': issue.description,
-        'last_journal': last_journal_with_user,
+        'author': author_name,
+        'assigned_to': assigned_to_name,
+        'last_journal': last_journal_with_user
     }
+
 
 
 
@@ -1677,48 +1692,52 @@ async def check_updates(user_id):
             detailed_issue = redmine.redmine.issue.get(issue_id, include='journals')
             new_issue = to_dict(detailed_issue)
 
+            author = new_issue['author']
+            assigned_to = new_issue['assigned_to']
+
             if issue_id not in last_state[user_id]:
                 logging.info(f"New issue_id: {issue_id} for user_id: {user_id}")
-                message = f"У вас новая задача или обновлена старая!\nЗадача #{issue_id}\nСтатус: {issue.status.name}\nТема: {issue.subject}\nОписание: {issue.description}\n"
+                message = f"У вас новая задача или обновлена старая!\nЗадача #{issue_id}\nСтатус: {new_issue['status']}\nАвтор: {author}\nИсполнитель: {assigned_to}\nТема: {new_issue['subject']}\nОписание: {new_issue['description']}\n"
 
                 new_comment = new_issue.get('last_journal')
                 if new_comment:
                     message += f"Новый комментарий от: {new_comment}\n"
 
-                await bot.send_message(user_id, message, reply_markup=types.InlineKeyboardMarkup(
+                await send_long_message(user_id, message, reply_markup=types.InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [types.InlineKeyboardButton(text="Добавить комментарий", callback_data=f"comment_{issue_id}")], # <-- добавлена кнопка
+                        [types.InlineKeyboardButton(text="Добавить комментарий", callback_data=f"comment_{issue_id}")],
+                        [types.InlineKeyboardButton(text="Подробнее", callback_data=f"details_{issue_id}")],
                         [types.InlineKeyboardButton(text="Просмотреть задачу", url=f"{redmine.url}/issues/{issue_id}")]
                     ]))
+                
             else:
                 differences = ""
                 new_comment = None
 
-                if issue_id in last_state[user_id]:
-                    old_issue = last_state[user_id][issue_id]
-                    for key in new_issue:
-                        if old_issue.get(key) != new_issue.get(key):
-                            logging.info(f"Found difference in key: {key} for issue_id: {issue_id}")
-                            if key == 'last_journal':
-                                new_comment = new_issue.get(key)
-                            else:
-                                differences += f"{key} изменено с '{old_issue.get(key)}' на '{new_issue.get(key)}'\n"
+                old_issue = last_state[user_id][issue_id]
+                for key in new_issue:
+                    if old_issue.get(key) != new_issue.get(key):
+                        logging.info(f"Found difference in key: {key} for issue_id: {issue_id}")
+                        if key == 'last_journal':
+                            new_comment = new_issue.get(key)
+                        else:
+                            differences += f"{key} изменено с '{old_issue.get(key)}' на '{new_issue.get(key)}'\n"
 
-                message = f"Задача #{issue_id}\nСтатус: {issue.status.name}\nТема: {issue.subject} обновлена:\nОписание: {issue.description}\n"
+                message = f"Задача #{issue_id} обновлена:\nСтатус: {new_issue['status']}\nАвтор: {author}\nИсполнитель: {assigned_to}\nТема: {new_issue['subject']}\nОписание: {new_issue['description']}\n"
 
                 if differences:
                     message += differences
                 if new_comment:
                     message += f"Новый комментарий от: {new_comment}\n"
 
-                await bot.send_message(user_id, message, reply_markup=types.InlineKeyboardMarkup(
+                await send_long_message(user_id, message, reply_markup=types.InlineKeyboardMarkup(
                     inline_keyboard=[
                         [types.InlineKeyboardButton(text="Добавить комментарий", callback_data=f"comment_{issue_id}")],
+                        [types.InlineKeyboardButton(text="Подробнее", callback_data=f"details_{issue_id}")],
                         [types.InlineKeyboardButton(text="Просмотреть задачу", url=f"{redmine.url}/issues/{issue_id}")]
                     ]))
 
                 last_state[user_id][issue_id] = new_issue
-
 
             last_check_times[user_id] = datetime.utcnow()
 
@@ -1726,7 +1745,58 @@ async def check_updates(user_id):
         logging.error(f"Error in checking updates for user {user_id}: {e}")
         logging.error(traceback.format_exc())
 
-@dp.callback_query_handler(lambda c: c.data.startswith('edit_status_'))
+
+async def send_long_message(chat_id, text, reply_markup=None):
+    MAX_MESSAGE_LENGTH = 4096
+    if len(text) <= MAX_MESSAGE_LENGTH:
+        return await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    
+    parts = [text[i:i+MAX_MESSAGE_LENGTH] for i in range(0, len(text), MAX_MESSAGE_LENGTH)]
+    message = None
+    for part in parts:
+        message = await bot.send_message(chat_id, part, reply_markup=reply_markup)
+    return message
+
+@dp.callback_query_handler(lambda c: c.data.startswith('details_'))
+async def handle_details(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    issue_id = callback_query.data.split('_')[1]  # Извлекаем ID задачи
+
+    try:
+        redmine = await get_redmine(user_id)
+        issue = redmine.redmine.issue.get(issue_id, include='journals')
+
+        # Форматирование комментариев
+        journal_entries = list(issue.journals)
+        comments = [(entry.user.name, entry.notes) for entry in journal_entries if entry.notes]
+        formatted_comments = '\n\n'.join([f"{name} писал(а):\n{comment}" for name, comment in comments]) if comments else "Нет комментариев"
+
+        # Формирование основной информации о задаче
+        base_info = (
+            f"Задача #{issue.id} - {issue.status.name}\n"
+            f"Тема: {issue.subject}\n"
+            f"Статус: {issue.status.name}\n"
+            f"Описание: {issue.description}\n"
+            f"Автор: {issue.author.name if issue.author else 'Неизвестный автор'}\n"
+            f"Исполнитель: {issue.assigned_to.name if issue.assigned_to else 'Не назначено'}\n"
+        )
+
+        # Отправка основной информации
+        await send_long_message(user_id, base_info)
+
+        # Отправка комментариев, если они есть
+        if comments:
+            await send_long_message(user_id, f"Комментарии:\n{formatted_comments}", reply_markup=comment_buttons(issue_id))
+        else:
+            await bot.send_message(user_id, "Нет комментариев", reply_markup=comment_buttons(issue_id))
+
+    except Exception as e:
+        logging.error(f"Ошибка при получении подробной информации о задаче: {e}")
+        await bot.send_message(user_id, "Произошла ошибка при обработке деталей задачи. Пожалуйста, повторите попытку.")
+
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('edit_staсtus_'))
 async def process_callback_edit_status(callback_query: types.CallbackQuery):
     logger.info("process_callback_edit_status called")
     await bot.answer_callback_query(callback_query.id)
