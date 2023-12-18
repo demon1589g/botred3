@@ -166,26 +166,37 @@ chosen_projects = {}
 
 async def periodic_check_projects():
     while True:
-        for user_id, projects in chosen_projects.items():
-            await check_and_update_issues(user_id, projects, inactivity_period_days=14)
-        await asyncio.sleep(12 * 60 * 60)  # Пауза на 12 часов
+        try:
+            for user_id, projects in chosen_projects.items():
+                await check_and_update_issues(user_id, projects, inactivity_period_days=7)
+            await asyncio.sleep(12 * 60 * 60)  # Пауза на 12 часов
+        except Exception as e:
+            logger.error(f"Error in periodic_check_projects: {e}")
+            await asyncio.sleep(500)  # Краткая пауза перед повторной попыткой
+
 
 # Запуск асинхронной задачи
 
 
 
 async def get_projects_with_tasks_admin():
-    logger.info("Get projects with tasks")
-    redmine = get_redmine_api_admin(ADMIN_TELEGRAM_ID)  
-    all_projects = redmine.redmine.project.all()
-    projects_with_tasks = {}
+    try:
+        logger.info("Get projects with tasks")
+        redmine = get_redmine_api_admin(ADMIN_TELEGRAM_ID)  
+        all_projects = redmine.redmine.project.all()
+        projects_with_tasks = {}
 
-    for project in all_projects:
-        issues = redmine.redmine.issue.filter(project_id=project.id, status_id="*")  
-        if issues:
-            projects_with_tasks[project.id] = issues
+        for project in all_projects:
+            issues = redmine.redmine.issue.filter(project_id=project.id, status_id="*")  
+            if issues:
+                projects_with_tasks[project.id] = issues
 
-    return projects_with_tasks
+        return projects_with_tasks
+    except Exception as e:
+        logger.error(f"Error in get_projects_with_tasks_admin: {e}")
+        return {}
+
+    
 
 async def generate_markup_for_projects(user_id):
     markup = types.InlineKeyboardMarkup()
@@ -209,17 +220,26 @@ async def generate_markup_for_projects(user_id):
 @dp.message_handler(lambda message: message.text == "Админская кнопка 👹" and str(message.from_user.id) == ADMIN_TELEGRAM_ID)
 async def admin_button_handler(message: types.Message):
     logger.info("Admin button handler was triggered")
-    markup = await generate_markup_for_projects(message.from_user.id)
-    await bot.send_message(message.chat.id, "Выберите проекты для проверки:", reply_markup=markup)
+    markup = await generate_admin_options_markup()  # Вызов изменённой функции
+    await bot.send_message(message.chat.id, "Выберите опцию:", reply_markup=markup)
 
 
 
 
 
+async def generate_admin_options_markup():
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Автозакрытие задач", callback_data="auto_close_tasks"))
+    markup.add(types.InlineKeyboardButton("Выгрузка логов", callback_data="export_logs"))
+    markup.add(types.InlineKeyboardButton("Перезапуск", callback_data="restart"))
+    return markup
 
 
-
-
+@dp.callback_query_handler(lambda call: call.data == "auto_close_tasks" and str(call.from_user.id) == ADMIN_TELEGRAM_ID)
+async def auto_close_tasks_handler(call: types.CallbackQuery):
+    logger.info("Auto close tasks handler was triggered")
+    markup = await generate_markup_for_projects(call.from_user.id)
+    await bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="Выберите проекты для автозакрытия задач:", reply_markup=markup)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith('choose_project_'))
@@ -268,7 +288,7 @@ async def process_callback_projects_done(callback_query: types.CallbackQuery):
         print("Entering process_callback_projects_done")
 
 # async def check_and_update_issues(user_id, project_ids, inactivity_period_minutes=2):
-async def check_and_update_issues(user_id, project_ids, inactivity_period_days=14):
+async def check_and_update_issues(user_id, project_ids, inactivity_period_days=7):
     try:
         logger.info(f"Started check_and_update_issues for user {user_id} with projects {project_ids}")
         redmine = get_redmine_api_admin(ADMIN_TELEGRAM_ID)
@@ -1796,7 +1816,7 @@ async def handle_details(callback_query: types.CallbackQuery):
 
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith('edit_staсtus_'))
+@dp.callback_query_handler(lambda c: c.data.startswith('edit_status_'))
 async def process_callback_edit_status(callback_query: types.CallbackQuery):
     logger.info("process_callback_edit_status called")
     await bot.answer_callback_query(callback_query.id)
