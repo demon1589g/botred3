@@ -1883,11 +1883,11 @@ async def notification_job():
             # Проверяем все обновления для всех пользователей
             for user_id in list(user_notifications_status.keys()):
                 await check_updates(user_id)
-            await asyncio.sleep(66)
+            await asyncio.sleep(666)
         except Exception as e:
             logging.error(f"Error in notification job: {e}")
             logging.error(traceback.format_exc())
-            await asyncio.sleep(66)
+            await asyncio.sleep(666)
 
 @dp.callback_query_handler(lambda c: c.data == 'enable_notifications')
 async def enable_notifications(query: types.CallbackQuery):
