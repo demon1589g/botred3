@@ -155,7 +155,10 @@ async def start(message: types.Message):
             
             await bot.send_message(message.chat.id, "Выберите действие:", reply_markup=markup)
         else:
-            await bot.send_message(message.chat.id, "Telegram ID не найден в базе. У вас нет доступа к этому боту.")
+            additional_text = ("Чтобы получить доступ к телеграм боту вам необходимо добавить ваш TG ID в личный кабинет на сайте physics.itmo.ru. и хотя бы раз авторизоваться на сайте helpdesk.physics.itmo.ru \nВаш TG ID - {}\n").format(user_id)
+            await bot.send_message(message.chat.id, "Telegram ID не найден в базе. У вас нет доступа к этому боту.\n" + additional_text)
+            await bot.send_document(message.chat.id, open("instruction.jpg", 'rb'))
+
     except Exception as e:
         await bot.send_message(
             message.chat.id, "Произошла ошибка при попытке получения информации о пользователе. Пожалуйста, попробуйте снова позже.")
@@ -175,7 +178,7 @@ async def periodic_check_projects():
             await asyncio.sleep(500)  # Краткая пауза перед повторной попыткой
 
 
-# Запуск асинхронной задачи
+# Запуск асинхронной задачи1
 
 
 
@@ -1721,7 +1724,7 @@ async def check_updates(user_id):
 
                 new_comment = new_issue.get('last_journal')
                 if new_comment:
-                    message += f"Новый комментарий от: {new_comment}\n"
+                    message += f"\nНовый комментарий от: {new_comment}\n"
 
                 await send_long_message(user_id, message, reply_markup=types.InlineKeyboardMarkup(
                     inline_keyboard=[
@@ -1748,7 +1751,7 @@ async def check_updates(user_id):
                 if differences:
                     message += differences
                 if new_comment:
-                    message += f"Новый комментарий от: {new_comment}\n"
+                    message += f"\nНовый комментарий от: {new_comment}\n"
 
                 await send_long_message(user_id, message, reply_markup=types.InlineKeyboardMarkup(
                     inline_keyboard=[
