@@ -28,13 +28,13 @@ ITEMS_PER_PAGE = 8
 PAGE_SIZE = 10
 
 
-REST_API_URL = "https://physics.itmo.ru/ru/rest/export/json/check-users-roles-email"
-REST_API_TOKEN = os.environ["REST_API_TOKEN"]
-TELEGRAM_API_TOKEN = os.environ["TELEGRAM_API_TOKEN"]
-REDMINE_URL = "https://helpdesk.physics.itmo.ru"
-REDMINE_API_KEY = os.environ["REDMINE_API_KEY"]
-REDMINE_API_KEY_admin = os.environ["REDMINE_API_KEY_admin"]
-ADMIN_TELEGRAM_ID =  os.environ["ADMIN_TELEGRAM_ID"]
+# REST_API_URL = "https://physics.itmo.ru/ru/rest/export/json/check-users-roles-email"
+# REST_API_TOKEN = os.environ["REST_API_TOKEN"]
+# TELEGRAM_API_TOKEN = os.environ["TELEGRAM_API_TOKEN"]
+# REDMINE_URL = "https://helpdesk.physics.itmo.ru"
+# REDMINE_API_KEY = os.environ["REDMINE_API_KEY"]
+# REDMINE_API_KEY_admin = os.environ["REDMINE_API_KEY_admin"]
+# ADMIN_TELEGRAM_ID =  os.environ["ADMIN_TELEGRAM_ID"]
 
 
 
@@ -66,7 +66,6 @@ async def get_redmine(user_id) -> Redmine:
         user, mail, redmine_api_key  = USER_API.get_user_by_tid(user_id)
         user_redmines[user_id] = RedmineAPI(REDMINE_URL, redmine_api_key)
     return user_redmines[user_id]
-
 
 
 
@@ -111,7 +110,7 @@ async def get_user(redmine, user_id):
 
 
 
-async def create_issue(redmine, project_id, subject, description, assigned_to_id, priority_id, due_date, watcher_user_ids=None):
+async def create_issue(redmine, project_id,tracker_id, subject, description, assigned_to_id, priority_id, due_date, watcher_user_ids=None):
     logger.info(f"Create issue - project_id: {project_id}, subject: {subject}, description: {description}, assigned_to_id: {assigned_to_id}, priority_id: {priority_id}, due_date: {due_date}, watcher_user_ids: {watcher_user_ids}")
     if not priority_id:
         raise ValueError("Пожалуйста, выберите приоритет задачи.")
@@ -119,6 +118,7 @@ async def create_issue(redmine, project_id, subject, description, assigned_to_id
     issue = redmine.redmine.issue.create(
         project_id=project_id,
         subject=subject,
+        tracker_id = tracker_id,
         description=description,
         assigned_to_id=assigned_to_id,
         priority_id=priority_id,
@@ -393,6 +393,11 @@ def cancel_button_creation():
     markup.add(InlineKeyboardButton("Отмена ввода", callback_data="cancel_issue_creation"))
     return markup
 
+async def get_trackers(user_id, project_id):
+    redmine = await get_redmine(user_id)
+    project = redmine.redmine.project.get(project_id)
+    return project.trackers
+
 @dp.callback_query_handler(lambda c: c.data.startswith('project_'))
 async def process_callback_project(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
@@ -403,8 +408,26 @@ async def process_callback_project(callback_query: types.CallbackQuery):
     project_id = int(callback_query.data.split('_')[1])
     user_data['project'] = project_id
     user_data['stage'] = 'subject'
-    await bot.send_message(user_id, 'Введите тему задачи:', reply_markup=cancel_button_creation())
+    trackers = await get_trackers(user_id, project_id)
+    if not trackers:
+        await bot.send_message(user_id, 'В выбранном проекте нет доступных трекеров.')
+        return
+    kb = InlineKeyboardMarkup()
+    for tracker in trackers:
+        kb.add(InlineKeyboardButton(tracker.name, callback_data=f'tracker_{tracker.id}'))
+    await bot.send_message(user_id, 'Выберите трекер:', reply_markup=kb)
+    user_data['stage'] = 'tracker'
 
+@dp.callback_query_handler(lambda c: c.data.startswith('tracker_'))
+async def process_callback_tracker(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user_data = user_issue_creation.get(user_id)
+    if user_data is None or user_data['stage'] != 'tracker':
+        return
+    tracker_id = int(callback_query.data.split('_')[1])
+    user_data['tracker'] = tracker_id
+    user_data['stage'] = 'subject'  # Переходим к следующему этапу
+    await bot.send_message(user_id, 'Введите тему задачи:', reply_markup=cancel_button_creation())
 
 @dp.message_handler(lambda message: user_issue_creation.get(message.from_user.id, {}).get('stage') == 'subject')
 async def process_message_subject(message: types.Message):
@@ -518,6 +541,8 @@ def get_list_assingee_users(project):
 
 
 
+user_list_cache = {}
+
 async def process_message_assignee(message: types.Message, page: int = 1, project_id: int = None):
     bot_user_id = message.from_user.id
     logger.info(f"Assignee step - bot_user_id: {bot_user_id}")
@@ -525,39 +550,52 @@ async def process_message_assignee(message: types.Message, page: int = 1, projec
     user_data = user_issue_creation.get(bot_user_id, {'stage': 'get_assignee'})
     user_data['stage'] = 'get_assignee'
 
+    logger.info(f"Current user_data: {user_data}")
+
     if project_id is None:
-       
         project_id = user_data.get('project')
 
-    redmine = await get_redmine(bot_user_id)
-    project = redmine.redmine.project.get(project_id)
-    user_data['users'] = get_list_assingee_users(project)
-    user_issue_creation[bot_user_id] = user_data  
+    logger.info(f"Current project_id: {project_id}")
 
-    ITEMS_PER_PAGE = 5  
-    total_pages = (len(get_list_assingee_users(project)) - 1) // ITEMS_PER_PAGE + 1
+    # Проверяем, есть ли сохраненные пользователи в кеше, иначе выполняем запрос
+    if project_id not in user_list_cache:
+        redmine = await get_redmine(bot_user_id)
+        project = redmine.redmine.project.get(project_id)
+        user_list_cache[project_id] = get_list_assingee_users(project)
+
+    user_list = user_list_cache[project_id]
+
+    ITEMS_PER_PAGE = 15  
+    total_pages = (len(user_list) - 1) // ITEMS_PER_PAGE + 1
 
     start_index = (page - 1) * ITEMS_PER_PAGE
     end_index = start_index + ITEMS_PER_PAGE
-    users_slice = get_list_assingee_users(project)[start_index:end_index]
+    users_slice = user_list[start_index:end_index]
 
-    logger.info(f"Page: {page}, Start index: {start_index}, End index: {end_index}, Total users: {len(get_list_assingee_users(project))}")
+    logger.info(f"Page: {page}, Start index: {start_index}, End index: {end_index}, Total users: {len(user_list)}")
 
     kb = InlineKeyboardMarkup(row_width=1)
-    for user in users_slice:
-        name, user_id = user
-        kb.add(InlineKeyboardButton(name, callback_data=f'user_{user_id}'))
-    if page > 1:
-        kb.insert(InlineKeyboardButton('Previous', callback_data=f'previous_page:{page-1}:{project_id}'))
-    if end_index < len(get_list_assingee_users(project)):
-        kb.add(InlineKeyboardButton('Next', callback_data=f'next_page:{page+1}:{project_id}'))
-
     
+    if users_slice:
+        for user in users_slice:
+            name, user_id = user
+            kb.add(InlineKeyboardButton(name, callback_data=f'user_{user_id}'))
+    else:
+        kb.add(InlineKeyboardButton("No users found", callback_data="no_users", disabled=True))
+
+    if total_pages > 1:
+        buttons_row = []
+        if page > 1:
+            buttons_row.append(InlineKeyboardButton("◀️ Previous", callback_data=f"previous_page:{page-1}:{project_id}"))
+        buttons_row.append(InlineKeyboardButton(f"Page {page}/{total_pages}", callback_data="dummy_data", disabled=True))
+        if end_index < len(user_list):
+            buttons_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"next_page:{page+1}:{project_id}"))
+        kb.row(*buttons_row)
+
     assignee_message = await bot.send_message(message.chat.id, 'Choose an assignee:', reply_markup=kb)
     user_data['assignee_message_id'] = assignee_message.message_id
     user_issue_creation[bot_user_id] = user_data
 
-    
     await bot.delete_message(message.chat.id, message.message_id)
 
 
@@ -660,17 +698,22 @@ async def process_callback_skip_due_date(callback_query: types.CallbackQuery):
     await bot.send_message(user_id, text='Дата завершения пропущена.')
     await confirm_issue(user_id)
 
+
 async def confirm_issue(user_id: int):
     user_data = user_issue_creation.get(user_id)
     if user_data is None:
         logger.error(f"Error on confirming issue - user_id: {user_id}, No user_data")
         await bot.send_message(user_id, "Произошла ошибка, пожалуйста, начните процесс создания задачи сначала.")
         return
+
     project_id = user_data['project']
     assignee_id = user_data['assignee']
+    tracker_id = user_data.get('tracker')
     priority_name = user_data['priorityname']
+
     try:
-        project_name, assignee_name = get_project_info(project_id, assignee_id,user_id)
+        project_name, assignee_name = get_project_info(project_id, assignee_id, user_id)
+        tracker_name = await get_tracker_name_by_id(user_id, tracker_id) if tracker_id else "Не указан"
     except Exception as e:
         logger.error(f"Error on getting project info - project_id: {project_id}, assignee_id: {assignee_id}, error: {str(e)}")
         raise
@@ -693,16 +736,17 @@ async def confirm_issue(user_id: int):
     confirm_kb.add(InlineKeyboardButton('Редактировать', callback_data='confirm_no'))
     confirm_kb.add(InlineKeyboardButton('Добавить наблюдателей', callback_data='select_watchers'))
 
+
     await bot.send_message(user_id, f"Пожалуйста, подтвердите или отредактируйте задачу:\n\n"
                                     f"Проект: {project_name}\n"
+                                    f"Трекер: {tracker_name}\n"
                                     f"Тема: {user_data['subject']}\n"
                                     f"Описание: {user_data['description']}\n"
                                     f"Исполнитель: {assignee_name}\n"
                                     f"Приоритет: {priority_name}\n"
                                     f"Дата завершения: {user_data.get('due_date', 'Пропущено')}\n"
                                     f"{watchers_text}\n",
-                          reply_markup=confirm_kb)
-
+                                    reply_markup=confirm_kb)
 
 @dp.callback_query_handler(lambda c: c.data == 'restart_issue_creation')
 async def restart_issue_creation(callback_query: types.CallbackQuery):
@@ -722,6 +766,7 @@ async def confirm_issue_creation(callback_query: types.CallbackQuery):
 
     redmine = await get_redmine(user_id)
     project_id = user_data['project']
+    tracker_id = user_data.get('tracker')
     assignee_id = user_data['assignee']
     subject = user_data['subject']
     description = user_data['description']
@@ -735,6 +780,7 @@ async def confirm_issue_creation(callback_query: types.CallbackQuery):
     issue = await create_issue(
         redmine=redmine,
         project_id=project_id,
+        tracker_id = tracker_id,
         subject=subject,
         description=description,
         assigned_to_id=assignee_id,
@@ -761,6 +807,7 @@ async def reject_issue_creation(callback_query: types.CallbackQuery):
         return
     edit_kb = InlineKeyboardMarkup()
     edit_kb.add(InlineKeyboardButton('Начать создание задачи с самого начала', callback_data='restart_issue_creation'))
+    edit_kb.add(InlineKeyboardButton('Трекер', callback_data='edit_tracker'))
     edit_kb.add(InlineKeyboardButton('Тема', callback_data='edit_subject'))
     edit_kb.add(InlineKeyboardButton('Описание', callback_data='edit_description'))
     edit_kb.add(InlineKeyboardButton('Исполнитель', callback_data='edit_assignee'))
@@ -774,9 +821,22 @@ async def process_callback_back_to_confirm(callback_query: types.CallbackQuery):
     telegram_user_id = callback_query.from_user.id
     await confirm_issue(telegram_user_id)
 
+
+async def get_tracker_name_by_id(user_id, tracker_id):
+    redmine = await get_redmine(user_id)
+    try:
+        tracker = redmine.redmine.tracker.get(tracker_id)
+        return tracker.name
+    except Exception as e:
+        logger.error(f"Error on getting tracker info - tracker_id: {tracker_id}, error: {str(e)}")
+        return "Неизвестный трекер"
+
+
 @dp.callback_query_handler(lambda c: c.data == 'select_watchers')
 async def process_callback_select_watchers(callback_query: types.CallbackQuery):
     await select_watchers(callback_query)
+
+
 
 
 async def select_watchers(callback_query: types.CallbackQuery, page: int = 1):
@@ -930,6 +990,29 @@ async def process_callback_edit_assignee(callback_query: types.CallbackQuery):
 
     await confirm_issue(telegram_user_id)
 
+
+
+@dp.callback_query_handler(lambda c: c.data == 'edit_tracker')
+async def edit_tracker(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user_data = user_issue_creation.get(user_id)
+    project_id = user_data['project']
+
+    trackers = await get_trackers(user_id, project_id)
+    kb = InlineKeyboardMarkup()
+    for tracker in trackers:
+        kb.add(InlineKeyboardButton(tracker.name, callback_data=f'edit_tracker_{tracker.id}'))
+    await bot.send_message(user_id, 'Выберите новый трекер:', reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('edit_tracker_'))
+async def process_edit_tracker_selection(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user_data = user_issue_creation.get(user_id)
+    tracker_id = int(callback_query.data.split('_')[2])
+    user_data['tracker'] = tracker_id
+    user_data['stage'] = 'confirm'
+    user_issue_creation[user_id] = user_data
+    await confirm_issue(user_id)
 
 @dp.callback_query_handler(lambda c: c.data == 'edit_subject')
 async def edit_subject(callback_query: types.CallbackQuery):
