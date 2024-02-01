@@ -1715,10 +1715,10 @@ def to_dict(issue):
     last_journal_with_user = f"{last_user}: {last_journal}" if last_user else last_journal
 
     # Извлекаем информацию об авторе задачи
-    author_name = issue.author.name if issue.author else "Неизвестный автор"
+    author_name = getattr(issue.author, 'name', "Неизвестный автор")
 
-    # Извлекаем информацию о том, кому задача назначена
-    assigned_to_name = issue.assigned_to.name if issue.assigned_to else "Не назначено"
+    # Извлекаем информацию о том, кому задача назначена, безопасно обрабатываем отсутствие атрибута
+    assigned_to_name = getattr(issue.assigned_to, 'name', "Не назначено") if issue.assigned_to else "Не назначено"
 
     # Составляем и возвращаем словарь с данными задачи
     return {
@@ -1764,9 +1764,14 @@ async def fetch_issues(redmine, personal_id, group_ids, updated_since):
 
 async def check_updates(user_id):
     try:
+     
+        if not user_notifications_status.get(user_id, False):
+            logging.info(f"Уведомления для пользователя {user_id} выключены.")
+            return  
         logging.info(f"Starting check_updates for user_id: {user_id}")
 
         redmine = await get_redmine(user_id)
+
         user = await get_user(redmine, 'me')
         
         personal_id = user.id
@@ -1783,20 +1788,21 @@ async def check_updates(user_id):
 
         logging.info(f"Fetched {len(all_issues)} issues for user_id: {user_id} since {updated_since}")
 
+        # Получаем время включения уведомлений для пользователя
+        notification_enabled_time = notification_manager.get_enable_time(user_id)
+
+        # Инициализация last_state для нового пользователя
         if user_id not in last_state:
             last_state[user_id] = {}
-            for issue in all_issues:
-                issue_id = str(issue.id)
-                detailed_issue = redmine.redmine.issue.get(issue_id, include='journals')
-                last_state[user_id][issue_id] = to_dict(detailed_issue)
-            logging.info(f"Initialized last_state[{user_id}] with current issues")
-            last_check_times[user_id] = datetime.utcnow()
-            return
 
         for issue in all_issues:
             issue_id = str(issue.id)
             detailed_issue = redmine.redmine.issue.get(issue_id, include='journals')
             new_issue = to_dict(detailed_issue)
+
+            # Пропускаем задачи, обновленные до включения уведомлений
+            if detailed_issue.updated_on < notification_enabled_time:
+                continue
 
             author = new_issue['author']
             assigned_to = new_issue['assigned_to']
@@ -1969,11 +1975,25 @@ async def notification_job():
             # Проверяем все обновления для всех пользователей
             for user_id in list(user_notifications_status.keys()):
                 await check_updates(user_id)
-            await asyncio.sleep(666)
+            await asyncio.sleep(66)
         except Exception as e:
             logging.error(f"Error in notification job: {e}")
             logging.error(traceback.format_exc())
-            await asyncio.sleep(666)
+            await asyncio.sleep(66)
+
+# Глобальный словарь для хранения времени включения уведомлений
+class NotificationManager:
+    def __init__(self):
+        self.enable_times = {}
+
+    async def set_enable_time(self, user_id):
+        self.enable_times[user_id] = datetime.utcnow()
+
+    def get_enable_time(self, user_id):
+        return self.enable_times.get(user_id, datetime.utcnow())
+
+# Создание экземпляра класса
+notification_manager = NotificationManager()
 
 @dp.callback_query_handler(lambda c: c.data == 'enable_notifications')
 async def enable_notifications(query: types.CallbackQuery):
@@ -1982,13 +2002,17 @@ async def enable_notifications(query: types.CallbackQuery):
     user_id = query.from_user.id
     user_notifications_status[user_id] = True  # Обновляем статус уведомлений для этого пользователя
 
+    # Сохраняем время включения уведомлений через менеджер
+    await notification_manager.set_enable_time(user_id)
+
     global notifications_started
     if not notifications_started:
-        # Если это первый раз, когда пользователь включает уведомления, запускаем сразу же проверку обновлений
         notifications_started = True
         await check_updates(user_id)  # Сразу проверяем обновления
 
     await bot.send_message(query.message.chat.id, "Уведомления включены ✅")
+
+
 
 @dp.callback_query_handler(lambda c: c.data == 'disable_notifications')
 async def disable_notifications(query: types.CallbackQuery):
