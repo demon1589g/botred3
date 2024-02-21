@@ -367,25 +367,75 @@ async def check_and_update_issues(user_id, project_ids, inactivity_period_days=7
 
 
 
+from typing import Union
+from aiogram.utils.exceptions import MessageNotModified
 
 
-async def handle_create_issue(callback_query: types.CallbackQuery):
-    logger.info(f"Create issue - user_id: {callback_query.from_user.id}")
-    user_id = callback_query.from_user.id
-    user_issue_creation[user_id] = {} 
-    redmine =await get_redmine(user_id)
+async def handle_create_issue(message: Union[types.Message, types.CallbackQuery], page: int = 1):
+    if isinstance(message, types.Message):
+        user_id = message.from_user.id
+    else:  # types.CallbackQuery
+        user_id = message.from_user.id
+        message = message.message  # Работаем с исходным сообщением для callback_query
 
+    logger.info(f"Create issue - user_id: {user_id}")
+    if user_id not in user_issue_creation:
+        user_issue_creation[user_id] = {'message_id': None}
+    
+    ITEMS_PER_PAGE = 10
     logger.info(f"Fetching projects - user_id: {user_id}")
     projects = await get_projects(user_id)
-    if not projects: 
+    if not projects:
         await bot.send_message(user_id, 'Нет доступных проектов.')
         return
-    kb = InlineKeyboardMarkup()
-    for project in projects:
+
+    total_pages = max(1, (len(projects) - 1) // ITEMS_PER_PAGE + 1)
+    start_index = (page - 1) * ITEMS_PER_PAGE
+    end_index = start_index + ITEMS_PER_PAGE
+    projects_slice = projects[start_index:end_index]
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    for project in projects_slice:
         kb.add(InlineKeyboardButton(project.name, callback_data=f'project_{project.id}'))
-    await bot.send_message(user_id, 'Выберите проект:', reply_markup=kb)
-    user_issue_creation[user_id] = {'stage': 'project'}
+
+    buttons_row = []
+    if page > 1:
+        buttons_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"prev_project_page:{page-1}"))
+    if total_pages > 1:
+        buttons_row.append(InlineKeyboardButton(f"Страница {page}/{total_pages}", callback_data="page_indicator", disabled=True))
+    if page < total_pages:
+        buttons_row.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"next_project_page:{page+1}"))
+    kb.row(*buttons_row)
+
+    try:
+        if user_issue_creation[user_id]['message_id']:
+            message_id = user_issue_creation[user_id]['message_id']
+            await bot.edit_message_text('Выберите проект:', chat_id=user_id, message_id=message_id, reply_markup=kb)
+        else:
+            sent_message = await bot.send_message(chat_id=user_id, text='Выберите проект:', reply_markup=kb)
+            user_issue_creation[user_id]['message_id'] = sent_message.message_id
+    except MessageNotModified:
+        logger.info("Message was not modified (user possibly clicked the same pagination button).")
+    user_issue_creation[user_id]['stage'] = 'project'
     logger.info(f"Projects fetched - user_id: {user_id}")
+
+
+
+
+
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('next_project_page:'))
+async def process_next_project_page(callback_query: types.CallbackQuery):
+    _, page = callback_query.data.split(':')
+    page = int(page)
+    await handle_create_issue(callback_query, page)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('prev_project_page:'))
+async def process_prev_project_page(callback_query: types.CallbackQuery):
+    _, page = callback_query.data.split(':')
+    page = int(page)
+    await handle_create_issue(callback_query, page)
 
 
 def cancel_button_creation():
@@ -565,7 +615,7 @@ async def process_message_assignee(message: types.Message, page: int = 1, projec
 
     user_list = user_list_cache[project_id]
 
-    ITEMS_PER_PAGE = 15  
+    ITEMS_PER_PAGE = 5  
     total_pages = (len(user_list) - 1) // ITEMS_PER_PAGE + 1
 
     start_index = (page - 1) * ITEMS_PER_PAGE
@@ -603,18 +653,20 @@ async def process_message_assignee(message: types.Message, page: int = 1, projec
 async def process_callback_next_page(callback_query: types.CallbackQuery):
     _, page, project_id = callback_query.data.split(':')
     page = int(page)
+    project_id = int(project_id)  # Преобразуем project_id обратно в int
     await bot.answer_callback_query(callback_query.id)  
     await bot.edit_message_reply_markup(callback_query.message.chat.id, callback_query.message.message_id)  
     await process_message_assignee(callback_query.message, page, project_id)  
-
 
 @dp.callback_query_handler(lambda c: c.data.startswith('previous_page:'))
 async def process_callback_previous_page(callback_query: types.CallbackQuery):
     _, page, project_id = callback_query.data.split(':')
     page = int(page)
+    project_id = int(project_id)  # Преобразуем project_id обратно в int
     await bot.answer_callback_query(callback_query.id)  
     await bot.edit_message_reply_markup(callback_query.message.chat.id, callback_query.message.message_id)  
-    await process_message_assignee(callback_query.message, page, project_id)
+    await process_message_assignee(callback_query.message, page, project_id)  
+
 
 
 def get_project_info(project_id, assigned, user_id):
@@ -846,12 +898,12 @@ async def select_watchers(callback_query: types.CallbackQuery, page: int = 1):
         return
 
     project_id = user_data['project']
-    redmine =await get_redmine(telegram_user_id)
+    redmine = await get_redmine(telegram_user_id)
     project = redmine.redmine.project.get(project_id)
-    user_data['users'] = get_list_assingee_users(project)  # в этом списке у нас уже все пользователи, их можно использовать как наблюдателей
+    user_data['users'] = get_list_assingee_users(project)  # используем этот список для выбора наблюдателей
     user_issue_creation[telegram_user_id] = user_data
 
-    ITEMS_PER_PAGE = 5
+    ITEMS_PER_PAGE = 10
     total_pages = (len(user_data['users']) - 1) // ITEMS_PER_PAGE + 1
 
     start_index = (page - 1) * ITEMS_PER_PAGE
@@ -862,15 +914,20 @@ async def select_watchers(callback_query: types.CallbackQuery, page: int = 1):
     for user in users_slice:
         name, user_id = user
         callback_data = f'select_watcher_{user_id}'
-        if user_id in user_data['watchers']:
-            callback_data += '_selected'  # добавляем суффикс '_selected', если пользователь уже выбран как наблюдатель
+        if user_id in user_data.get('watchers', []):
+            callback_data += '_selected'
             kb.add(InlineKeyboardButton(f'{name} 🟢', callback_data=callback_data))
         else:
             kb.add(InlineKeyboardButton(name, callback_data=callback_data))
+    
+    # Строка навигации
+    navigation_buttons = []
     if page > 1:
-        kb.insert(InlineKeyboardButton('Previous', callback_data=f'select_previous_page:{page-1}:{project_id}'))
-    if end_index < len(user_data['users']):
-        kb.add(InlineKeyboardButton('Next', callback_data=f'select_next_page:{page+1}:{project_id}'))
+        navigation_buttons.append(InlineKeyboardButton('⬅️', callback_data=f'select_previous_page:{page-1}:{project_id}'))
+    navigation_buttons.append(InlineKeyboardButton(f'Страница {page}/{total_pages}', callback_data='current_page_disabled', disabled=True))
+    if page < total_pages:
+        navigation_buttons.append(InlineKeyboardButton('➡️', callback_data=f'select_next_page:{page+1}:{project_id}'))
+    kb.row(*navigation_buttons)
 
     kb.add(InlineKeyboardButton('Подтвердить', callback_data='confirm_watchers'))
     kb.add(InlineKeyboardButton('Назад', callback_data='back_to_confirm'))
@@ -879,6 +936,7 @@ async def select_watchers(callback_query: types.CallbackQuery, page: int = 1):
                                 chat_id=telegram_user_id,
                                 message_id=callback_query.message.message_id,
                                 reply_markup=kb)
+
 
     
 @dp.callback_query_handler(lambda c: c.data.startswith('select_watcher_'))
@@ -932,7 +990,7 @@ async def edit_assignee(callback_query: types.CallbackQuery, page: int = 1):
         return
 
     project_id = user_data['project']
-    redmine =await get_redmine(telegram_user_id)
+    redmine = await get_redmine(telegram_user_id)
     project = redmine.redmine.project.get(project_id)
     user_data['users'] = get_list_assingee_users(project)
     user_issue_creation[telegram_user_id] = user_data  
@@ -948,14 +1006,21 @@ async def edit_assignee(callback_query: types.CallbackQuery, page: int = 1):
     for user in users_slice:
         name, user_id = user
         kb.add(InlineKeyboardButton(name, callback_data=f'edit_user_{user_id}'))
+
+    navigation_buttons = []
     if page > 1:
-        kb.insert(InlineKeyboardButton('Previous', callback_data=f'edit_previous_page:{page-1}:{project_id}'))
-    if end_index < len(user_data['users']):
-        kb.add(InlineKeyboardButton('Next', callback_data=f'edit_next_page:{page+1}:{project_id}'))
+        navigation_buttons.append(InlineKeyboardButton('⬅️', callback_data=f'edit_previous_page:{page-1}:{project_id}'))
+    navigation_buttons.append(InlineKeyboardButton(f'Страница {page}/{total_pages}', callback_data='current_page_disabled', disabled=True))
+    if page < total_pages:
+        navigation_buttons.append(InlineKeyboardButton('➡️', callback_data=f'edit_next_page:{page+1}:{project_id}'))
+    
+    kb.row(*navigation_buttons)  # Добавляем кнопки навигации в отдельный ряд
 
     await bot.send_message(telegram_user_id, 'Выберите нового исполнителя:', reply_markup=kb)
-    
     await bot.delete_message(callback_query.message.chat.id, callback_query.message.message_id)
+
+
+
 
 
 
@@ -1193,6 +1258,10 @@ async def edit_due_date_invalid(message: types.Message):
 
 @dp.message_handler(Text(equals='Создать задачу 🛠️'))
 async def create_issue_command_handler(message: types.Message):
+    user_id = message.from_user.id
+    # Сброс message_id для пользователя, чтобы отправить новое сообщение
+    if user_id in user_issue_creation:
+        user_issue_creation[user_id]['message_id'] = None
     await handle_create_issue(message)
 
 
@@ -1456,7 +1525,8 @@ async def handle_select_project(callback_query: types.CallbackQuery, callback_pr
     for project in projects:
 
         kb.add(InlineKeyboardButton(f"{project.name} (задач: {issue_counts[project.id]})", 
-                                    callback_data=f'{callback_prefix}project_{project.id}~{project.name}'))
+                                    callback_data=f'{callback_prefix}project_{project.id}'))
+
         
 
     
@@ -1480,8 +1550,9 @@ async def process_callback_project(callback_query: types.CallbackQuery, callback
     await bot.answer_callback_query(callback_query.id)
     
     # Используем '~' в качестве разделителя
-    split_data = callback_query.data.split(f'{callback_data_prefix}project_')[1].split("~")
-    project_id = int(split_data[0])
+    split_data = callback_query.data.split('_')
+    project_id = int(split_data[2])  # Получаем ID проекта из callback_data
+
     project_name = "~".join(split_data[1:])
     
     # Using the refactored view_issues function with issue_filter parameter
